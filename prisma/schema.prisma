@@ -1,0 +1,227 @@
+// ── Prisma Schema for iPlanning ──
+// Migration: `npx prisma migrate dev --name init`
+// This works like Flyway — each migration is versioned and tracked.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ══════════════════════════════════════════════
+// PROJECT
+// ══════════════════════════════════════════════
+model Project {
+  id          String    @id @default(uuid())
+  name        String
+  description String    @default("")
+  startDate   DateTime  @default(now())
+  rates         Json      @default("{}")   // { "PM": 8000, "BA": 5000, ... }
+  holidayConfig Json      @default("{\"weekdays\":[0,6],\"specialDates\":[],\"specialColor\":\"#fef3c7\"}")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?  // null = active, non-null = soft-deleted
+
+  // Relations
+  requirements Requirement[]
+  phases       Phase[]
+  tasks        Task[]
+  stdMdRows    StdMdRow[]
+  calMdRoles   CalMdRole[]
+  sources      SourceMaster[]
+  roleConfigs  RoleConfig[]
+
+  @@map("projects")
+}
+
+// ══════════════════════════════════════════════
+// REQUIREMENT
+// ══════════════════════════════════════════════
+model Requirement {
+  id        String @id @default(uuid())
+  projectId String
+  reqNo     String   // e.g. "R_001"
+  text      String   @default("")
+  source    String   @default("")
+  sortOrder Int      @default(0)
+
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // Many-to-many with Task
+  tasks     TaskRequirement[]
+
+  @@unique([projectId, reqNo])
+  @@map("requirements")
+}
+
+// ══════════════════════════════════════════════
+// PHASE
+// ══════════════════════════════════════════════
+model Phase {
+  id        String @id @default(uuid())
+  projectId String
+  phaseCode String   // e.g. "T01"
+  name      String
+  color     String   @default("#3b82f6")
+  sortOrder Int      @default(0)
+
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks     Task[]
+
+  @@unique([projectId, phaseCode])
+  @@map("phases")
+}
+
+// ══════════════════════════════════════════════
+// TASK
+// ══════════════════════════════════════════════
+model Task {
+  id           String   @id @default(uuid())
+  projectId    String
+  phaseId      String
+  taskCode     String    // e.g. "T01-01"
+  type         TaskType  @default(Task)
+  name         String
+  featureGroup String    @default("")
+  featureType  String    @default("")
+  taskMode     TaskMode  @default(manual)
+  roleMD       Json      @default("{}")  // { "PM": 2, "Developer": 5 }
+  activeRoles  Json?     // ["PM", "Developer"] or null
+  startDate    DateTime? // actual start date (set in Plan tab)
+  endDate      DateTime? // auto-calculated from startDate + MD working days
+  startWeek    Int       @default(1)  // legacy, kept for backward compat
+  endWeek      Int       @default(1)  // legacy, kept for backward compat
+  dependencies Json      @default("[]") // [{taskId, type: "FS"|"FF"|"SS"|"SF", lag: 0}]
+  sortOrder    Int       @default(0)
+
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  phase        Phase     @relation(fields: [phaseId], references: [id], onDelete: Cascade)
+
+  // Many-to-many with Requirement
+  requirements TaskRequirement[]
+
+  // Cal MD links
+  calMdItemLinks CalMdItem[] @relation("LinkedTask")
+
+  @@unique([projectId, taskCode])
+  @@map("tasks")
+}
+
+enum TaskType {
+  Task
+  Deliverable
+  Milestone
+}
+
+enum TaskMode {
+  auto
+  manual
+  calmd
+  allocate
+  // legacy values kept for migration compatibility
+  feature
+  derived
+}
+
+// ── Task ↔ Requirement (many-to-many) ──
+model TaskRequirement {
+  taskId        String
+  requirementId String
+
+  task          Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, requirementId])
+  @@map("task_requirements")
+}
+
+// ══════════════════════════════════════════════
+// STANDARD MANDAY (Master Data)
+// ══════════════════════════════════════════════
+model StdMdRow {
+  id        String @id @default(uuid())
+  projectId String
+  stdCode   String    // e.g. "SM01"
+  group     String    // e.g. "Screen", "Feature"
+  type      String    // e.g. "Simple Screen"
+  roleMD    Json      @default("{}")  // { "SA": 0.25, "Developer": 1, ... }
+  sortOrder Int       @default(0)
+
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, stdCode])
+  @@map("std_md_rows")
+}
+
+// ══════════════════════════════════════════════
+// CAL MD (% Distribution per Role)
+// ══════════════════════════════════════════════
+model CalMdRole {
+  id        String @id @default(uuid())
+  projectId String
+  role      String    // e.g. "PM", "BA"
+  sortOrder Int       @default(0)
+
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  items     CalMdItem[]
+
+  @@unique([projectId, role])
+  @@map("cal_md_roles")
+}
+
+model CalMdItem {
+  id           String      @id @default(uuid())
+  calMdRoleId  String
+  name         String       // e.g. "Project Plan / Kick-off"
+  value        Float        @default(0)  // percentage or fixed MD
+  type         CalMdType    @default(pct)
+  baseScope    String       @default("all")  // 'all' | phaseId — scope for % calculation
+  linkedTaskId String?      // FK → Task (optional)
+  sortOrder    Int          @default(0)
+
+  calMdRole    CalMdRole    @relation(fields: [calMdRoleId], references: [id], onDelete: Cascade)
+  linkedTask   Task?        @relation("LinkedTask", fields: [linkedTaskId], references: [id], onDelete: SetNull)
+
+  @@map("cal_md_items")
+}
+
+enum CalMdType {
+  pct    // % ของ Base — distribution (must sum ~100% per scope)
+  addon  // % เพิ่มเติม — add-on % (no sum constraint, just additive)
+  fixed  // Fixed MD
+}
+
+// ══════════════════════════════════════════════
+// ROLE CONFIG (per-project role master)
+// ══════════════════════════════════════════════
+model RoleConfig {
+  id        String  @id @default(uuid())
+  projectId String
+  name      String
+  color     String  @default("#94a3b8")
+  isUser    Boolean @default(false)
+  sortOrder Int     @default(0)
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, name])
+  @@map("role_configs")
+}
+
+// ══════════════════════════════════════════════
+// SOURCE MASTER
+// ══════════════════════════════════════════════
+model SourceMaster {
+  id        String @id @default(uuid())
+  projectId String
+  name      String
+  sortOrder Int    @default(0)
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, name])
+  @@map("source_masters")
+}
