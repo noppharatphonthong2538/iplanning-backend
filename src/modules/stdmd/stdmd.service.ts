@@ -5,10 +5,24 @@ import { PrismaService } from '../../prisma/prisma.service';
 export class StdmdService {
   constructor(private prisma: PrismaService) { }
 
-  create(projectId: string, createStdmdDto: any) {
+  async create(projectId: string, createStdmdDto: any) {
+    // Always generate a collision-safe stdCode on the backend.
+    // Using frontend-supplied length-based codes breaks when rows have been deleted.
+    const existing = await this.prisma.stdMdRow.findMany({
+      where: { projectId },
+      select: { stdCode: true },
+    });
+    // Extract numeric suffix from codes like "SM01", "SM12" → take MAX + 1
+    const maxNum = existing.reduce((max, r) => {
+      const n = parseInt(r.stdCode.replace(/\D/g, ''), 10);
+      return isNaN(n) ? max : Math.max(max, n);
+    }, 0);
+    const stdCode = `SM${String(maxNum + 1).padStart(2, '0')}`;
+
     return this.prisma.stdMdRow.create({
       data: {
         ...createStdmdDto,
+        stdCode,   // backend-generated code always wins
         projectId,
       },
     });
@@ -65,6 +79,35 @@ export class StdmdService {
       sorted.map((r, i) =>
         this.prisma.stdMdRow.update({ where: { id: r.id }, data: { sortOrder: i } }),
       ),
+    );
+
+    return this.findByProject(projectId);
+  }
+
+  /**
+   * Bulk-assign sequential sortOrders based on the caller-supplied ordered list of row IDs.
+   * Used after within-group drag-and-drop to persist the new row order to the database.
+   */
+  async reorderRows(projectId: string, orderedIds: string[]) {
+    if (!orderedIds.length) return this.findByProject(projectId);
+
+    // Prisma update requires a unique-field where clause; id (@id) is the unique key.
+    // We verify ownership by only touching IDs that belong to this project.
+    const owned = await this.prisma.stdMdRow.findMany({
+      where: { projectId, id: { in: orderedIds } },
+      select: { id: true },
+    });
+    const ownedSet = new Set(owned.map((r) => r.id));
+
+    await this.prisma.$transaction(
+      orderedIds
+        .filter((id) => ownedSet.has(id))
+        .map((id, i) =>
+          this.prisma.stdMdRow.update({
+            where: { id },
+            data: { sortOrder: i },
+          }),
+        ),
     );
 
     return this.findByProject(projectId);

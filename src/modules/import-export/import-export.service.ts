@@ -177,10 +177,25 @@ export class ImportExportService {
   }
 
   // ── StdMD ──
+  // Canonical group display order (mirrors frontend stdMdGroups default)
+  private static readonly STD_MD_GROUPS = ['Screen', 'Feature', 'Report', 'Log', 'Integration', 'Document'];
+
   private async exportStdMd(projectId: string): Promise<Buffer> {
     const roles = await this.getRoles(projectId);
     const rows = await this.prisma.stdMdRow.findMany({
       where: { projectId }, orderBy: { sortOrder: 'asc' },
+    });
+
+    // Sort to match screen display order: group position first, then sortOrder within each group.
+    // This handles cases where new rows are appended globally (sortOrder = total count)
+    // instead of being inserted in group-correct position.
+    const groupIdx = (g: string) => {
+      const i = ImportExportService.STD_MD_GROUPS.indexOf(g);
+      return i >= 0 ? i : ImportExportService.STD_MD_GROUPS.length; // unknown groups go last
+    };
+    rows.sort((a, b) => {
+      const gd = groupIdx(a.group) - groupIdx(b.group);
+      return gd !== 0 ? gd : a.sortOrder - b.sortOrder;
     });
     const mdCols = roles.map((r) => `md_${r}`);
     const header = [ACTION_COL, 'stdCode', 'group', 'type', ...mdCols, 'sortOrder'];
@@ -269,11 +284,17 @@ export class ImportExportService {
       ] as (string | number | null)[];
     });
 
-    const sheet: XlsxSheet = {
+    const taskSheet: XlsxSheet = {
       name: 'Tasks',
       rows: [header, ...dataRows],
     };
-    return buildXlsx([sheet, this.helpSheet('tasks', roles)]);
+
+    // ── Phases sheet — lets users add / edit phases from the same file ──
+    const phaseHeader = [ACTION_COL, 'phaseCode', 'name', 'color'];
+    const phaseRows = phases.map((p) => ['', p.phaseCode, p.name, p.color] as (string | null)[]);
+    const phaseSheet: XlsxSheet = { name: 'Phases', rows: [phaseHeader, ...phaseRows] };
+
+    return buildXlsx([phaseSheet, taskSheet, this.helpSheet('tasks', roles)]);
   }
 
   // ── CalMD ──
@@ -332,8 +353,15 @@ export class ImportExportService {
         'sortOrder: integer',
       ].filter(Boolean),
       tasks: [
+        '=== Phases sheet (processed first) ===',
         '_action: add | update | delete | (blank = upsert)',
-        'phaseCode: phase code e.g. T01  [required for add]',
+        'phaseCode: unique phase code e.g. T01  [KEY]',
+        'name: phase display name',
+        'color: hex color e.g. #3b82f6',
+        '',
+        '=== Tasks sheet ===',
+        '_action: add | update | delete | (blank = upsert)',
+        'phaseCode: phase code e.g. T01  [required for add — create in Phases sheet first]',
         'taskCode: unique code e.g. T01-01  [KEY]',
         'type: Task | Deliverable | Milestone',
         'name: task name',
@@ -394,12 +422,96 @@ export class ImportExportService {
       );
     }
 
+    if (sheet === 'tasks') {
+      // Process Phases sheet first (if present) so new phases are available for task rows
+      const phaseRows =
+        parsed['Phases'] ??
+        parsed[Object.keys(parsed).find((k) => k.toLowerCase() === 'phases') ?? ''] ??
+        null;
+      const phaseResult = phaseRows
+        ? await this.importPhasesFromRows(projectId, phaseRows)
+        : { added: 0, updated: 0, deleted: 0, errors: [] };
+
+      const taskResult = await this.importTasks(projectId, rows);
+
+      // Merge results: surface phase errors alongside task errors
+      return {
+        added:   phaseResult.added   + taskResult.added,
+        updated: phaseResult.updated + taskResult.updated,
+        deleted: phaseResult.deleted + taskResult.deleted,
+        errors:  [
+          ...phaseResult.errors.map((e) => `[Phases] ${e}`),
+          ...taskResult.errors,
+        ],
+      };
+    }
+
     switch (sheet) {
       case 'requirements': return this.importRequirements(projectId, rows);
       case 'stdmd':        return this.importStdMd(projectId, rows);
-      case 'tasks':        return this.importTasks(projectId, rows);
       case 'calmd':        return this.importCalMd(projectId, rows);
     }
+  }
+
+  // ── Import: Phases (used as pre-pass when importing the Tasks file) ──
+  private async importPhasesFromRows(projectId: string, rows: string[][]): Promise<ImportResult> {
+    const objs = rowsToObjects(rows);
+    const result: ImportResult = { added: 0, updated: 0, deleted: 0, errors: [] };
+
+    for (let i = 0; i < objs.length; i++) {
+      const obj = objs[i];
+      const rowLabel = `Row ${i + 2}`;
+      const action    = parseAction(obj[ACTION_COL]);
+      const phaseCode = obj['phaseCode'];
+      if (!phaseCode) { result.errors.push(`${rowLabel}: phaseCode ว่าง — ข้ามแถว`); continue; }
+
+      try {
+        const existing = await this.prisma.phase.findUnique({
+          where: { projectId_phaseCode: { projectId, phaseCode } },
+        });
+
+        if (action === 'delete') {
+          if (!existing) { result.errors.push(`${rowLabel}: ไม่พบ phaseCode "${phaseCode}"`); continue; }
+          await this.prisma.phase.delete({ where: { id: existing.id } });
+          result.deleted++;
+          continue;
+        }
+
+        if (action === 'add' && existing) {
+          result.errors.push(`${rowLabel}: phaseCode "${phaseCode}" มีอยู่แล้ว`);
+          continue;
+        }
+        if (action === 'update' && !existing) {
+          result.errors.push(`${rowLabel}: ไม่พบ phaseCode "${phaseCode}" สำหรับ update`);
+          continue;
+        }
+
+        const data: any = {};
+        if (obj['name']  !== undefined && obj['name']  !== '') data.name  = obj['name'];
+        if (obj['color'] !== undefined && obj['color'] !== '') data.color = obj['color'];
+        // Always sync sortOrder from row position so re-importing fixes existing order
+        data.sortOrder = i;
+
+        if (existing) {
+          await this.prisma.phase.update({ where: { id: existing.id }, data });
+          result.updated++;
+        } else {
+          await this.prisma.phase.create({
+            data: {
+              projectId,
+              phaseCode,
+              name:      data.name  ?? phaseCode,
+              color:     data.color ?? '#3b82f6',
+              sortOrder: i,
+            },
+          });
+          result.added++;
+        }
+      } catch (err: any) {
+        result.errors.push(`${rowLabel}: ${err?.message ?? 'ไม่ทราบสาเหตุ'}`);
+      }
+    }
+    return result;
   }
 
   // ── Import: Requirements ──
@@ -583,11 +695,12 @@ export class ImportExportService {
           : (existing?.taskMode ?? 'manual');
         const featureTypeVal = obj['featureType'] !== undefined ? obj['featureType'] : (existing?.featureType ?? '');
 
-        // ── roleMD: only applies to manual mode ──
-        // For auto mode → md comes from stdMd (ignore md_ columns)
-        // For calmd/allocate mode → md comes from Cal MD links (ignore md_ columns)
+        // ── roleMD: applies to manual / calmd / allocate modes ──
+        // For auto mode → MD comes from stdMd lookup (ignore md_ columns)
+        // For calmd/allocate → md_ columns store fallback values; CalMD links override at display time
+        // For manual → md_ columns are the actual stored values
         let roleMD: Record<string, number> | undefined;
-        if (taskModeVal === 'manual') {
+        if (taskModeVal === 'manual' || taskModeVal === 'calmd' || taskModeVal === 'allocate') {
           roleMD = existing
             ? ({ ...(existing.roleMD as object) } as Record<string, number>)
             : {};
@@ -598,12 +711,13 @@ export class ImportExportService {
                 // Blank cell → remove this role from roleMD
                 delete roleMD[role];
               } else {
-                roleMD[role] = parseNum(obj[col]);
+                const v = parseNum(obj[col]);
+                if (v > 0) roleMD[role] = v;
+                else delete roleMD[role];  // zero or negative → remove
               }
             }
           }
         }
-        // calmd/allocate mode: don't touch roleMD — Cal MD drives the display
 
         // ── activeRoles for auto mode ──
         // If any md_ column exists in the file, rebuild activeRoles from non-blank, non-zero values.
@@ -733,12 +847,12 @@ export class ImportExportService {
     const roleByName  = new Map(roles.map((r) => [r.role, r]));
     const phaseByCode = new Map(phases.map((p) => [p.phaseCode, p]));
     const taskByCode  = new Map(tasks.map((t) => [t.taskCode, t]));
-    // item lookup: "role::itemName" → item
-    const itemKey = (role: string, name: string) => `${role}::${name}`;
+    // item lookup: "role::itemName::baseScope" → item  (scope disambiguates same-name items across phases)
+    const itemKey = (role: string, name: string, scope: string = 'all') => `${role}::${name}::${scope}`;
     const itemMap = new Map<string, { id: string; calMdRoleId: string }>();
     for (const role of roles) {
       for (const item of role.items) {
-        itemMap.set(itemKey(role.role, item.name), { id: item.id, calMdRoleId: role.id });
+        itemMap.set(itemKey(role.role, item.name, item.baseScope ?? 'all'), { id: item.id, calMdRoleId: role.id });
       }
     }
 
@@ -754,33 +868,39 @@ export class ImportExportService {
       }
 
       try {
-        const existing = itemMap.get(itemKey(roleName, itemName));
+        // Resolve baseScope BEFORE lookup so we can build the correct key
+        const bsRaw = (obj['baseScope'] ?? 'all').trim();
+        let baseScope: string;
+        if (!bsRaw || bsRaw === 'all') {
+          baseScope = 'all';
+        } else {
+          const resolvedPhase = phaseByCode.get(bsRaw);
+          if (!resolvedPhase) {
+            result.errors.push(`${rowLabel}: ไม่พบ phaseCode "${bsRaw}" สำหรับ baseScope`);
+            continue;
+          }
+          baseScope = resolvedPhase.id;
+        }
+
+        const key = itemKey(roleName, itemName, baseScope);
+        const existing = itemMap.get(key);
 
         if (action === 'delete') {
-          if (!existing) { result.errors.push(`${rowLabel}: ไม่พบ "${roleName} / ${itemName}"`); continue; }
+          if (!existing) { result.errors.push(`${rowLabel}: ไม่พบ "${roleName} / ${itemName}" (scope: ${bsRaw})`); continue; }
           await this.prisma.calMdItem.delete({ where: { id: existing.id } });
-          itemMap.delete(itemKey(roleName, itemName));
+          itemMap.delete(key);
           result.deleted++;
           continue;
         }
 
         if (action === 'add' && existing) {
-          result.errors.push(`${rowLabel}: "${roleName} / ${itemName}" มีอยู่แล้ว`);
+          result.errors.push(`${rowLabel}: "${roleName} / ${itemName}" (scope: ${bsRaw}) มีอยู่แล้ว`);
           continue;
         }
         if (action === 'update' && !existing) {
-          result.errors.push(`${rowLabel}: ไม่พบ "${roleName} / ${itemName}" สำหรับ update`);
+          result.errors.push(`${rowLabel}: ไม่พบ "${roleName} / ${itemName}" (scope: ${bsRaw}) สำหรับ update`);
           continue;
         }
-
-        // Resolve baseScope
-        const bsRaw = (obj['baseScope'] ?? 'all').trim();
-        const baseScope = !bsRaw || bsRaw === 'all'
-          ? 'all'
-          : (phaseByCode.get(bsRaw)?.id ?? (() => {
-              result.errors.push(`${rowLabel}: ไม่พบ phaseCode "${bsRaw}" สำหรับ baseScope`);
-              return 'all';
-            })());
 
         // Resolve linkedTask
         const ltCode = (obj['linkedTask'] ?? '').trim();
@@ -832,7 +952,7 @@ export class ImportExportService {
               sortOrder: data.sortOrder,
             },
           });
-          itemMap.set(itemKey(roleName, itemName), { id: newItem.id, calMdRoleId: role!.id });
+          itemMap.set(key, { id: newItem.id, calMdRoleId: role!.id });
           result.added++;
         }
       } catch (e: any) {

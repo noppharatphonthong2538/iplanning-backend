@@ -48,6 +48,14 @@ export class PhasesController {
     return this.phasesService.reorderPhases(body.items ?? []);
   }
 
+  @Patch('projects/:projectId/phases/plan-reorder')
+  planReorderPhases(
+    @Param('projectId') _projectId: string,
+    @Body() body: { items: { id: string; planOrder: number }[] },
+  ) {
+    return this.phasesService.planReorderPhases(body.items ?? []);
+  }
+
   @Delete('phases/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
   remove(@Param('id') id: string) {

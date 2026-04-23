@@ -75,4 +75,25 @@ export class ProjectsController {
   remove(@Param('id') id: string) {
     return this.projectsService.remove(id);
   }
+
+  // ── StdMd Guide HTML ──
+
+  /** Get the project's custom StdMd guide, or null if using default */
+  @Get(':id/stdmd-guide')
+  getStdMdGuide(@Param('id') id: string) {
+    return this.projectsService.getStdMdGuide(id);
+  }
+
+  /** Save a custom StdMd guide HTML for this project */
+  @Put(':id/stdmd-guide')
+  setStdMdGuide(@Param('id') id: string, @Body() body: { html: string }) {
+    return this.projectsService.setStdMdGuide(id, body.html);
+  }
+
+  /** Reset back to the default guide (deletes the custom HTML) */
+  @Delete(':id/stdmd-guide')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  resetStdMdGuide(@Param('id') id: string) {
+    return this.projectsService.resetStdMdGuide(id);
+  }
 }

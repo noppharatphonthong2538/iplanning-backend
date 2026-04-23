@@ -17,6 +17,7 @@ export class PhasesService {
   findByProject(projectId: string) {
     return this.prisma.phase.findMany({
       where: { projectId },
+      orderBy: { sortOrder: 'asc' },
     });
   }
 
@@ -55,6 +56,17 @@ export class PhasesService {
         await tx.phase.update({ where: { id }, data: { phaseCode, name, color, sortOrder } });
       }
     });
+    return { reordered: items.length };
+  }
+
+  /** Plan-tab-only reorder: update planOrder only, no phaseCode renaming. */
+  async planReorderPhases(items: { id: string; planOrder: number }[]) {
+    if (!items.length) return { reordered: 0 };
+    await this.prisma.$transaction(
+      items.map(({ id, planOrder }) =>
+        this.prisma.phase.update({ where: { id }, data: { planOrder } }),
+      ),
+    );
     return { reordered: items.length };
   }
 }

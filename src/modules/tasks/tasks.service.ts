@@ -119,4 +119,69 @@ export class TasksService {
     });
     return { reordered: items.length };
   }
+
+  /**
+   * Plan-tab-only reorder: update planOrder only, no taskCode renaming.
+   * Also clears dependencies of moved tasks and removes references to them
+   * from other tasks in the same project.
+   */
+  async planReorderTasks(
+    projectId: string,
+    items: { id: string; planOrder: number }[],
+    clearDepIds: string[],    // task IDs whose entire dep array should be wiped (task-level reorder)
+    filterDepsIds: string[] = [], // task IDs for which only cross-group deps are removed (phase-level reorder)
+  ) {
+    const hasWork = items.length || clearDepIds.length || filterDepsIds.length;
+    if (!hasWork) return { reordered: 0 };
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1. Update planOrder for all reordered tasks
+      for (const { id, planOrder } of items) {
+        await tx.task.update({ where: { id }, data: { planOrder } });
+      }
+
+      // 2. Wipe entire dep arrays for clearDepIds (used by task-level reorder)
+      if (clearDepIds.length) {
+        await tx.task.updateMany({
+          where: { id: { in: clearDepIds } },
+          data: { dependencies: [] },
+        });
+      }
+
+      // 3. For filterDepsIds (phase-level reorder): keep only internal deps (within the group),
+      //    remove any dep pointing to a task outside the group
+      if (filterDepsIds.length) {
+        const filterTasks = await tx.task.findMany({
+          where: { id: { in: filterDepsIds } },
+          select: { id: true, dependencies: true },
+        });
+        for (const t of filterTasks) {
+          const deps = t.dependencies as any[];
+          if (!Array.isArray(deps) || !deps.length) continue;
+          const kept = deps.filter((d: any) => filterDepsIds.includes(d.taskId));
+          if (kept.length !== deps.length) {
+            await tx.task.update({ where: { id: t.id }, data: { dependencies: kept } });
+          }
+        }
+      }
+
+      // 4. Remove references to cleared/filtered tasks from all other tasks in this project
+      const allAffectedIds = [...clearDepIds, ...filterDepsIds];
+      if (!allAffectedIds.length) return;
+
+      const otherTasks = await tx.task.findMany({
+        where: { projectId, id: { notIn: allAffectedIds } },
+        select: { id: true, dependencies: true },
+      });
+      for (const t of otherTasks) {
+        const deps = t.dependencies as any[];
+        if (!Array.isArray(deps) || !deps.length) continue;
+        const filtered = deps.filter((d: any) => !allAffectedIds.includes(d.taskId));
+        if (filtered.length !== deps.length) {
+          await tx.task.update({ where: { id: t.id }, data: { dependencies: filtered } });
+        }
+      }
+    });
+    return { reordered: items.length };
+  }
 }

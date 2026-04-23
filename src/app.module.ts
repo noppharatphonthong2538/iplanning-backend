@@ -10,6 +10,7 @@ import { CalmdModule } from './modules/calmd/calmd.module';
 import { CostModule } from './modules/cost/cost.module';
 import { SourcesModule } from './modules/sources/sources.module';
 import { RolesModule } from './modules/roles/roles.module';
+import { ResourcesModule } from './modules/resources/resources.module';
 import { ImportExportModule } from './modules/import-export/import-export.module';
 
 @Module({
@@ -25,6 +26,7 @@ import { ImportExportModule } from './modules/import-export/import-export.module
     CostModule,
     SourcesModule,
     RolesModule,
+    ResourcesModule,
     ImportExportModule,
   ],
 })

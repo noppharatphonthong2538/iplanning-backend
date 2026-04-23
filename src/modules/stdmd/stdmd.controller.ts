@@ -53,4 +53,14 @@ export class StdmdController {
   ) {
     return this.stdmdService.reorderByGroups(projectId, body.groupOrder ?? []);
   }
+
+  /** Bulk-assign sequential sortOrders by passing the full ordered list of row IDs.
+   *  Used after within-group row drag-and-drop to persist the new order. */
+  @Patch('projects/:projectId/stdmd/reorder-rows')
+  reorderRows(
+    @Param('projectId') projectId: string,
+    @Body() body: { orderedIds: string[] },
+  ) {
+    return this.stdmdService.reorderRows(projectId, body.orderedIds ?? []);
+  }
 }

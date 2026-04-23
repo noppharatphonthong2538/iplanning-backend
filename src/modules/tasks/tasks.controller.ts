@@ -48,6 +48,19 @@ export class TasksController {
     return this.tasksService.reorderTasks(body.items ?? []);
   }
 
+  @Patch('projects/:projectId/tasks/plan-reorder')
+  planReorderTasks(
+    @Param('projectId') projectId: string,
+    @Body() body: { items: { id: string; planOrder: number }[]; clearDepIds?: string[]; filterDepsIds?: string[] },
+  ) {
+    return this.tasksService.planReorderTasks(
+      projectId,
+      body.items ?? [],
+      body.clearDepIds ?? [],
+      body.filterDepsIds ?? [],
+    );
+  }
+
   @Delete('tasks/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
   remove(@Param('id') id: string) {

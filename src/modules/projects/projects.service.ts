@@ -259,4 +259,27 @@ export class ProjectsService {
 
     return newProject;
   }
+
+  // ── StdMd Guide HTML ──
+
+  /** Returns { html: string | null, isCustom: boolean } */
+  async getStdMdGuide(id: string): Promise<{ html: string | null; isCustom: boolean }> {
+    const db = this.prisma as any;
+    const project = await db.project.findUnique({ where: { id }, select: { stdMdGuideHtml: true } });
+    const html = project?.stdMdGuideHtml ?? null;
+    return { html, isCustom: html !== null };
+  }
+
+  /** Save custom HTML — stored directly in the project row */
+  async setStdMdGuide(id: string, html: string): Promise<{ isCustom: boolean }> {
+    const db = this.prisma as any;
+    await db.project.update({ where: { id }, data: { stdMdGuideHtml: html } });
+    return { isCustom: true };
+  }
+
+  /** Reset to default — sets stdMdGuideHtml back to null */
+  async resetStdMdGuide(id: string): Promise<void> {
+    const db = this.prisma as any;
+    await db.project.update({ where: { id }, data: { stdMdGuideHtml: null } });
+  }
 }

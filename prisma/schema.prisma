@@ -21,6 +21,7 @@ model Project {
   startDate   DateTime  @default(now())
   rates         Json      @default("{}")   // { "PM": 8000, "BA": 5000, ... }
   holidayConfig Json      @default("{\"weekdays\":[0,6],\"specialDates\":[],\"specialColor\":\"#fef3c7\"}")
+  stdMdGuideHtml String?  // null = use default bundled guide; non-null = project-specific HTML
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   deletedAt     DateTime?  // null = active, non-null = soft-deleted
@@ -33,6 +34,7 @@ model Project {
   calMdRoles   CalMdRole[]
   sources      SourceMaster[]
   roleConfigs  RoleConfig[]
+  resources    ProjectResource[]
 
   @@map("projects")
 }
@@ -67,6 +69,7 @@ model Phase {
   name      String
   color     String   @default("#3b82f6")
   sortOrder Int      @default(0)
+  planOrder Int      @default(0)   // plan-tab-only order (independent of sortOrder)
 
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   tasks     Task[]
@@ -96,6 +99,8 @@ model Task {
   endWeek      Int       @default(1)  // legacy, kept for backward compat
   dependencies Json      @default("[]") // [{taskId, type: "FS"|"FF"|"SS"|"SF", lag: 0}]
   sortOrder    Int       @default(0)
+  planOrder    Int       @default(0)    // plan-tab-only order (independent of sortOrder)
+  planMode     String    @default("normal") // "normal" | "auto" | "manual" — Gantt duration strategy
 
   project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   phase        Phase     @relation(fields: [phaseId], references: [id], onDelete: Cascade)
@@ -192,6 +197,21 @@ enum CalMdType {
   pct    // % ของ Base — distribution (must sum ~100% per scope)
   addon  // % เพิ่มเติม — add-on % (no sum constraint, just additive)
   fixed  // Fixed MD
+}
+
+// ══════════════════════════════════════════════
+// PROJECT RESOURCES (per-project resource pool)
+// ══════════════════════════════════════════════
+model ProjectResource {
+  id        String  @id @default(uuid())
+  projectId String
+  role      String  // e.g. "Developer", "PM"
+  count     Int     @default(1)
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, role])
+  @@map("project_resources")
 }
 
 // ══════════════════════════════════════════════
